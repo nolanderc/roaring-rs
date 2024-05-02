@@ -3,6 +3,7 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::convert::{Infallible, TryFrom};
 use std::error::Error;
 use std::io;
+use std::mem::MaybeUninit;
 use std::ops::RangeInclusive;
 
 use crate::bitmap::container::{Container, ARRAY_LIMIT};
@@ -104,6 +105,48 @@ impl RoaringBitmap {
         }
 
         Ok(())
+    }
+
+    /// Serializes the bitmap into a pre-allocated, possibly uninitialized, buffer.
+    #[inline]
+    pub fn serialize_into_slice_uninit(&self, slice: &mut [MaybeUninit<u8>]) -> io::Result<()> {
+        // We must use MaybeUninit::slice_as_mut_ptr combined with write_unaligned
+        // https://doc.rust-lang.org/std/mem/union.MaybeUninit.html#method.slice_as_mut_ptr
+        // https://doc.rust-lang.org/std/ptr/fn.write_unaligned.html
+
+        struct UninitWriter<'a>(&'a mut [MaybeUninit<u8>]);
+
+        impl std::io::Write for UninitWriter<'_> {
+            #[inline]
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                let buf_uninit: &[MaybeUninit<u8>] =
+                    unsafe { std::slice::from_raw_parts(buf.as_ptr().cast(), buf.len()) };
+
+                let count = usize::min(self.0.len(), buf.len());
+                let (a, b) = std::mem::take(&mut self.0).split_at_mut(count);
+                a.copy_from_slice(buf_uninit);
+                self.0 = b;
+                Ok(count)
+            }
+
+            fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+                if self.write(buf)? == buf.len() {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "failed to write whole buffer",
+                    ))
+                }
+            }
+
+            #[inline(always)]
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
+        self.serialize_into(UninitWriter(slice))
     }
 
     /// Deserialize a bitmap into memory from [the standard Roaring on-disk
