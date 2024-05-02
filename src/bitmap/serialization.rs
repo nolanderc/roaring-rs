@@ -3,7 +3,6 @@ use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::convert::{Infallible, TryFrom};
 use std::error::Error;
 use std::io;
-use std::mem::MaybeUninit;
 use std::ops::RangeInclusive;
 
 use crate::bitmap::container::{Container, ARRAY_LIMIT};
@@ -34,6 +33,7 @@ impl RoaringBitmap {
     ///
     /// assert_eq!(rb1, rb2);
     /// ```
+    #[inline]
     pub fn serialized_size(&self) -> usize {
         let container_sizes: usize = self
             .containers
@@ -65,6 +65,7 @@ impl RoaringBitmap {
     ///
     /// assert_eq!(rb1, rb2);
     /// ```
+    #[inline]
     pub fn serialize_into<W: io::Write>(&self, mut writer: W) -> io::Result<()> {
         writer.write_u32::<LittleEndian>(SERIAL_COOKIE_NO_RUNCONTAINER)?;
         writer.write_u32::<LittleEndian>(self.containers.len() as u32)?;
@@ -97,50 +98,6 @@ impl RoaringBitmap {
                 Store::Bitmap(ref bits) => {
                     for &value in bits.as_array() {
                         writer.write_u64::<LittleEndian>(value)?;
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn serialize_into_uninit_slice(&self, mut slice: &mut [MaybeUninit<u8>]) -> io::Result<()> {
-        // We must use MaybeUninit::slice_as_mut_ptr combined with write_unaligned
-        // https://doc.rust-lang.org/std/mem/union.MaybeUninit.html#method.slice_as_mut_ptr
-        // https://doc.rust-lang.org/std/ptr/fn.write_unaligned.html
-
-        slice.write_u32::<LittleEndian>(SERIAL_COOKIE_NO_RUNCONTAINER)?;
-        slice.write_u32::<LittleEndian>(self.containers.len() as u32)?;
-
-        for container in &self.containers {
-            slice.write_u16::<LittleEndian>(container.key)?;
-            slice.write_u16::<LittleEndian>((container.len() - 1) as u16)?;
-        }
-
-        let mut offset = 8 + 8 * self.containers.len() as u32;
-        for container in &self.containers {
-            slice.write_u32::<LittleEndian>(offset)?;
-            match container.store {
-                Store::Array(ref values) => {
-                    offset += values.len() as u32 * 2;
-                }
-                Store::Bitmap(..) => {
-                    offset += 8 * 1024;
-                }
-            }
-        }
-
-        for container in &self.containers {
-            match container.store {
-                Store::Array(ref values) => {
-                    for &value in values.iter() {
-                        slice.write_u16::<LittleEndian>(value)?;
-                    }
-                }
-                Store::Bitmap(ref bits) => {
-                    for &value in bits.as_array() {
-                        slice.write_u64::<LittleEndian>(value)?;
                     }
                 }
             }
